@@ -81,4 +81,53 @@ This plugin publish the next topics:
 - ```/gtec/gazebo/uwb/anchors/tag_id``` : where ```tag_id``` is the value configured in the plugins. This topic publish the position of the UWB anchors in the scenario. Each anchor have a different color depending of its current LOS mode: green-LOS, yellow-NLOS Soft, blue-NLOS Hard and red-NLOS. The published messages are of type visualization_msgs/MarkerArray.msg ([visualization_msgs/MarkerArray Message](http://docs.ros.org/melodic/api/visualization_msgs/html/msg/MarkerArray.html))
 
 
+# Customized (USTB ME 814)
+Add Vehicle Mode:  
+
+```
+<plugin name='libgtec_uwb_plugin' filename='libgtec_uwb_plugin.so'>
+      <update_rate>25</update_rate>
+      <nlosSoftWallWidth>3</nlosSoftWallWidth>
+      <tag_x_offset>0</tag_x_offset>
+      <tag_y_offset>0</tag_y_offset>
+      <tag_z_offset>0</tag_z_offset>
+      <tag_link>tag_0</tag_link>
+      <anchor_prefix>uwb_anchor</anchor_prefix>
+      <all_los>false</all_los>
+      <tag_id>0</tag_id>
+      <maxDBDistance>14</maxDBDistance>
+   
+      <MaxPosNoise>300</MaxPosNoise>
+      <MinPosNoise>100</MinPosNoise>
+      <MaxRSS>-80</MaxRSS>
+      <MinRSS>-95</MinRSS>
+      <MaxDisDecay>5</MaxDisDecay>
+
+	
+      
+      <vehicle_prefix>iris</vehicle_prefix>
+      <PubRangeTopic>true</PubRangeTopic>
+      <PubRangeVehicleTopic>true</PubRangeVehicleTopic>
+
+      <NoObstacleRadius>0.236</NoObstacleRadius>
+      
+    </plugin>
+```
+* update_rate: num. of rates published by second.
+* nlosSoftWallWidth: how thin a wall must be to let the signal go through it. 
+* tag_x_offset: a x direction offset in meters to add to the current pose of the sensor.
+* tag_y_offset: a y direction offset in meters to add to the current pose of the sensor.
+* tag_z_offset: a offset in meters to add to the current height of the sensor.
+* anchor_prefix: all the anchors placed in the scenario must have a unique name that starts with this prefix.
+* all_los: if true, all the anchors are considered as in a LOS scenario. Except if there are too far from the tag, in that case they are considered as NLOS.
+* tag_id: tag identifier, a number.  
+```new param```  
+* PubRangeTopic & PubRangeVehicleTopic: choose which topic to publish
+* MaxPosNoise: MaxPosNoise unit. mm
+* MinPosNoise: MinPosNoise unit. mm
+* MaxRSS: MaxRSS unit. dB
+* MinRSS: MinRSS unit. dB
+* MaxDisDecay: Max Recived Signal Strength Decay in maxDBDistance (liner)
+* vehicle_prefix : vehicle prefix of UWB in Vehicle Mode
+* NoObstacleRadius: Ignore Obstacle Radius (for that this pluging can only detect one obstacle, which may cause bugs)
 

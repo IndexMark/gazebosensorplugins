@@ -30,18 +30,23 @@ SOFTWARE.
 #include <boost/bind.hpp>
 #include <ros/ros.h>
 #include <gtec_msgs/Ranging.h>
+#include <gtec_msgs/Ranging_Vehicle.h>
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <visualization_msgs/MarkerArray.h>
 #include <visualization_msgs/Marker.h>
 #include <gazebo/rendering/DynamicLines.hh>
 #include <tf/transform_datatypes.h>
 
+#include <iostream>
+
+using namespace std;
+
 namespace gazebo
 {
     class UwbPlugin : public ModelPlugin
     {
 
-        double rangingStd[141][3] =
+        double rangingStd[141][3] =        //距离数据？
         {
             {31.513, -12.192,  22.182},
             {31.513, -12.192,  22.182},
@@ -187,7 +192,7 @@ namespace gazebo
         };
 
 
-        double rssMean[141][3] =
+        double rssMean[141][3] =        //接收信号强度的平均值？
         {
             {-78.87, -80.479, -88.205},
             {-78.87, -80.479, -88.205},
@@ -332,7 +337,7 @@ namespace gazebo
             {-91.802, -95.257, -104.74}
         };
 
-        double rssStd[141][3] =
+        double rssStd[141][3] =             //接受信号强度数据？
         {
             {0.28265, 0.52405, 0.42595},
             {0.28265, 0.52405, 0.42595},
@@ -477,8 +482,8 @@ namespace gazebo
             {0.39899, 0.40199, 0.6586}
         };
 
-        double minPower[3] = {-94.5, -94.5, -94.5};
-        double rangingOffset[141][2] =
+        double minPower[3] = {-94.5, -94.5, -94.5};         //LOS、NLOS_H和NLOS_S三种情况下的最小接收信号强度
+        double rangingOffset[141][2] =                      //距离补偿参数
         {
             {-87.505, 228.73},
             {-86.505, 229.73},
@@ -624,12 +629,12 @@ namespace gazebo
         };
 
 
-        enum LOSType
+        enum LOSType        //枚举类型LOSType
         {
-            LOS,
-            NLOS,
-            NLOS_S,
-            NLOS_H
+            LOS,            //0,信号没有阻挡
+            NLOS,           //1,无信号，距离太远或者完全阻挡
+            NLOS_S,         //2,有信号，有较薄的障碍物，收到信号强度减弱
+            NLOS_H          //3，有微弱信号，障碍物太多，信号无法直接传递，但能收到反弹后的信号，比实际的距离更远
         };
 
     public:
@@ -637,63 +642,91 @@ namespace gazebo
             ModelPlugin(),
             sequence(0)
         {
-            this->updatePeriod = common::Time(0.0);
+            this->updatePeriod = common::Time(0.0);     //更新updatePeriod时间
         }
 
     public:
         void Load(physics::ModelPtr _parent, sdf::ElementPtr _sdf)
         {
-            if (!ros::isInitialized())
+            if (!ros::isInitialized())              //检查ros初始化
             {
                 ROS_FATAL_STREAM("A ROS node for Gazebo has not been initialized, unable to load plugin. "
                                  << "Load the Gazebo system plugin 'libgazebo_ros_api_plugin.so' in the gazebo_ros package)");
                 return;
             }
 
-            if (!_sdf->HasElement("update_rate"))
+            if (!_sdf->HasElement("update_rate"))   //检查是否设置update_rate参数
             {
                 ROS_FATAL_STREAM("GTEC UWB Plugin needs the parameter: update_rate");
             }
 
-            this->model = _parent;
-            this->world = _parent->GetWorld();
-            this->SetUpdateRate(_sdf->Get<double>("update_rate"));
-            this->nlosSoftWallWidth = 0.25;
-            this->tagZOffset = 0;
-            this->tagId = 0;
-            this->maxDBDistance = 14;
-            this->stepDBDistance = 0.1;
-            this->allBeaconsAreLOS = false;
-            this->useParentAsReference = false;
+            this->model = _parent;                                  //模型
+            this->world = _parent->GetWorld();                      //世界
+            this->SetUpdateRate(_sdf->Get<double>("update_rate"));  //上传频率
+            this->nlosSoftWallWidth = 0.25;                         //nlos-s情况的墙壁临界阈值
+            this->tagZOffset = 0;                                   //标签z方向上的偏置
 
+            //2023.2.21
+            this->tagXOffset = 0;                
+            this->tagYOffset = 0;                
 
-            if (_sdf->HasElement("all_los"))
+            this->tagId = 0;                                        //标签的ID
+            this->maxDBDistance = 14;                               //DB(基于数据？)的最大距离值
+            this->stepDBDistance = 0.1;                             //DB(基于数据？)的步长距离值
+            this->allBeaconsAreLOS = false;                         //是否所有信标都是LOS状态
+            this->useParentAsReference = false;                     //是否把parnet作为pose的reference
+
+            this->sequence = 0;
+
+            //2023.2.17
+            this->wallWidth  = 0;
+            this->MaxPosNoise = 300;
+            this->MinPosNoise = 100;
+            this->MaxRSS = -80.0;
+            this->MinRSS  = -95.0;
+
+            this->MaxDisDecay = 3.0;
+
+            //2023.2.21
+            this->NoObstacleRadius =0.236;                                        //忽略障碍物的半径
+
+            if (_sdf->HasElement("all_los"))    //检查是否设置all_los参数
             {
-                this->allBeaconsAreLOS = _sdf->Get<double>("all_los");
+                this->allBeaconsAreLOS = _sdf->Get<bool>("all_los");
             }
 
-            if (_sdf->HasElement("tag_id"))
+            if (_sdf->HasElement("tag_id"))     //检查是否设置tag_id参数
             {
                 this->tagId = _sdf->Get<double>("tag_id");
             }
 
-            if (_sdf->HasElement("tag_z_offset"))
+            if (_sdf->HasElement("tag_z_offset"))   //检查是否设置tag_z_offset参数
             {
                 this->tagZOffset = _sdf->Get<double>("tag_z_offset");
             }
 
-            if (_sdf->HasElement("nlosSoftWallWidth"))
+            //2023.2.21
+            if (_sdf->HasElement("tag_x_offset"))   //检查是否设置tag_z_offset参数
+            {
+                this->tagXOffset = _sdf->Get<double>("tag_x_offset");
+            }
+            if (_sdf->HasElement("tag_y_offset"))   //检查是否设置tag_z_offset参数
+            {
+                this->tagYOffset = _sdf->Get<double>("tag_y_offset");
+            }
+
+            if (_sdf->HasElement("nlosSoftWallWidth"))  //检查是否设置nlosSoftWallwidth参数
             {
                 this->nlosSoftWallWidth = _sdf->Get<double>("nlosSoftWallWidth");
             }
 
-            if (_sdf->HasElement("tag_link"))
+            if (_sdf->HasElement("tag_link"))       //检查是否设置tag_link参数
             {
-                std::string tag_link = _sdf->Get<std::string>("tag_link");
-                this->tagLink = _parent->GetLink(tag_link);
+                std::string tag_link = _sdf->Get<std::string>("tag_link");      //tag_link赋值为参数tag_link的值
+                this->tagLink = _parent->GetLink(tag_link);                     //tagLink赋值为parent中的tag_link
 
                 ROS_INFO("Parent name: %s ChildCount: %d", _parent->GetName().c_str(), _parent->GetChildCount());
-                if (this->tagLink == NULL)
+                if (this->tagLink == NULL)          //若tagLink为空，就把Parent作为reference
                 {
                     std::vector<physics::LinkPtr> links = _parent->GetLinks();
                     for (int i = 0; i < links.size(); ++i)
@@ -705,7 +738,7 @@ namespace gazebo
                 }
             }
 
-            if (_sdf->HasElement("anchor_prefix"))
+            if (_sdf->HasElement("anchor_prefix"))  //检查是否设置anchor_prefix参数,没有设置的话就用默认的"uwb_anchor"
             {
                 this->anchorPrefix = _sdf->Get<std::string>("anchor_prefix");
             }
@@ -714,62 +747,172 @@ namespace gazebo
                 this->anchorPrefix = "uwb_anchor";
             }
 
-            ROS_INFO("GTEC UWB Plugin is running. Tag %d", this->tagId);
-            ROS_INFO("GTEC UWB Plugin All parameters loaded");
+            //2023.2.18
+            if (_sdf->HasElement("vehicle_prefix"))  //检查是否设置vehicle_prefix参数,没有设置的话就用默认的"iris"
+            {
+                this->VehiclePrefix = _sdf->Get<std::string>("vehicle_prefix");
+            }
+            else
+            {
+                this->VehiclePrefix = "iris";
+                 ROS_INFO("No VehiclePrefix Data,  default: iris");
+            }
 
-            this->lastUpdateTime = common::Time(0.0);
+            //2023.2.15   新添最远距离参数maxDBDistance
+            if (_sdf->HasElement("maxDBDistance"))     //检查是否设置maxDBDistance参数
+            {
+                this->maxDBDistance = _sdf->Get<double>("maxDBDistance");
+            }
 
-            std::string topicRanging = "/gtec/toa/ranging";
+            //2023.2.17
+            if (_sdf->HasElement("MaxPosNoise"))     //检查是否设置MaxPosNoise参数
+            {
+                this->MaxPosNoise = _sdf->Get<int>("MaxPosNoise");
+            }
+            if (_sdf->HasElement("MinPosNoise"))     //检查是否设置MinPosNoise参数
+            {
+                this->MinPosNoise = _sdf->Get<int>("MinPosNoise");
+            }
+            if (_sdf->HasElement("MaxRSS"))     //检查是否设置MaxRSS参数
+            {
+                this->MaxRSS = _sdf->Get<float>("MaxRSS");
+            }
+            if (_sdf->HasElement("MinRSS"))     //检查是否设置MinRSS参数
+            {
+                this->MinRSS = _sdf->Get<float>("MinRSS");
+            }
+            if (_sdf->HasElement("MaxDisDecay"))     //检查是否设置MaxDisDecay参数
+            {
+                this->MaxDisDecay = _sdf->Get<float>("MaxDisDecay");
+            }
+            
+
+
+            if (_sdf->HasElement("vehicle_prefix"))  //检查是否设置vehicle_prefix参数,没有设置的话就用默认的"iris"
+            {
+                this->VehiclePrefix = _sdf->Get<std::string>("vehicle_prefix");
+            }
+            else
+            {
+                this->VehiclePrefix = "iris";
+                 ROS_INFO("No VehiclePrefix Data,  default: iris");
+            }
+
+            ROS_INFO("GTEC UWB Plugin is running. Tag %d", this->tagId);        //打印说明，输出tagID
+
+            //2023.2.20
+
+
+            std::string topicRanging = "/gtec/toa/ranging";         //设置测距ranging发布的话题名称
+            std::string topicRangingVehicle = "/gtec/toa/ranging_vehicle";         //设置测距ranging_vehicle发布的话题名称
+
+            //2023.2.21
+            if (_sdf->HasElement("NoObstacleRadius"))  //检查是否设置PubRangeTopic参数
+            {
+                this->NoObstacleRadius = _sdf->Get<double>("NoObstacleRadius");
+                ROS_INFO("UWB  Ranging NoObstacleRadius: %f", NoObstacleRadius);
+            }
+            else
+            {
+                this->NoObstacleRadius = 0.236;
+                 ROS_INFO("No UWB  Ranging NoObstacleRadius \n  Default:  0.236");
+            }
+
+
+            if (_sdf->HasElement("PubRangeTopic"))  //检查是否设置PubRangeTopic参数
+            {
+                this->PubRangeTopic = _sdf->Get<bool>("PubRangeTopic");
+                ROS_INFO("GTEC UWB Plugin Ranging Publishing in %s", topicRanging.c_str());
+            }
+            else
+            {
+                this->PubRangeTopic =  false;
+                 ROS_INFO("PubRangeTopic:   False\n  Topic of UWB distance between anchor and tag won't be published");
+            }
+
+            if (_sdf->HasElement("PubRangeVehicleTopic"))  //检查是否设置PubRangeVehicleTopic参数
+            {
+                this->PubRangeVehicleTopic = _sdf->Get<bool>("PubRangeVehicleTopic");
+                ROS_INFO("GTEC UWB Plugin Ranging_Vehicle Publishing in %s", topicRangingVehicle.c_str());
+            }
+            else
+            {
+                this->PubRangeVehicleTopic =  false;
+                 ROS_INFO("PubRangeVehicleTopic:   False\n  Topic of UWB distance between vehicles won't be published");
+            }
+
+
+
+
+            ROS_INFO("GTEC UWB Plugin All parameters loaded");                  //所有参数加载完毕
+
+            this->lastUpdateTime = common::Time(0.0);               //设置lastUpdateTime时间
+
+            /*std::string topicRanging = "/gtec/toa/ranging";         //设置测距ranging发布的话题名称
 
             ROS_INFO("GTEC UWB Plugin Ranging Publishing in %s", topicRanging.c_str());
 
-/*            stringStream.str("");
+            std::string topicRangingVehicle = "/gtec/toa/ranging_vehicle";         //设置测距ranging_vehicle发布的话题名称
+
+            ROS_INFO("GTEC UWB Plugin Ranging_Vehicle Publishing in %s", topicRangingVehicle.c_str());*/
+
+            /* stringStream.str("");
             stringStream.clear();
             stringStream << "/gtec/toa/anchors" << this->tagId;*/
-            std::string topicAnchors = "/gtec/toa/anchors";
+            //std::string topicAnchors = "/gtec/toa/anchors";     //设置锚点anchor发布的话题名称
 
-            ROS_INFO("GTEC UWB Plugin Anchors Position Publishing in %s", topicAnchors.c_str());
+            //ROS_INFO("GTEC UWB Plugin Anchors Position Publishing in %s", topicAnchors.c_str());
+            if( PubRangeTopic || PubRangeVehicleTopic)
+            {
 
-            ros::NodeHandle n;
-            this->gtecUwbPub = n.advertise<gtec_msgs::Ranging>(topicRanging, 1000);
-            this->gtecAnchors = n.advertise<visualization_msgs::MarkerArray>(topicAnchors, 1000);
+           
+                    ros::NodeHandle n;      //创建ROS节点句柄
+                    if( PubRangeTopic) this->gtecUwbPub = n.advertise<gtec_msgs::Ranging>(topicRanging, 1000);                 //创建话题topicRanging的发布者，话题类型为gtec_msgs:Ranging
+                    //2023.2.18
+                    if( PubRangeVehicleTopic) this->gtecUwbPubVehicle = n.advertise<gtec_msgs::Ranging_Vehicle>(topicRangingVehicle, 1000);                       //创建话题topicRangingVehicle的发布者，话题类型为gtec_msgs:Ranging_Vehicle
 
-            this->firstRay = boost::dynamic_pointer_cast<physics::RayShape>(
-                                 this->world->Physics()->CreateShape("ray", physics::CollisionPtr()));
 
-            this->secondRay = boost::dynamic_pointer_cast<physics::RayShape>(
-                                  this->world->Physics()->CreateShape("ray", physics::CollisionPtr()));
+                //this->gtecAnchors = n.advertise<visualization_msgs::MarkerArray>(topicAnchors, 1000);   //创建话题topicAnchors的发布者，话题类型为visualization_msgs::MarkerArray
 
-            this->updateConnection =
-                event::Events::ConnectWorldUpdateBegin(boost::bind(&UwbPlugin::OnUpdate, this, _1));
+                    this->firstRay = boost::dynamic_pointer_cast<physics::RayShape>(
+                                        this->world->Physics()->CreateShape("ray", physics::CollisionPtr()));      //指定firstRay为世界物理中的ray类型
+
+                    this->secondRay = boost::dynamic_pointer_cast<physics::RayShape>(
+                                        this->world->Physics()->CreateShape("ray", physics::CollisionPtr()));     //指定secondRay为世界物理中的ray类型
+
+                    this->updateConnection =
+                        event::Events::ConnectWorldUpdateBegin(boost::bind(&UwbPlugin::OnUpdate, this, _1));        //开始更新，运行OnUpdate
+
+
+             }
         }
 
     public:
         void OnUpdate(const common::UpdateInfo &_info)
         {
-            common::Time simTime = _info.simTime;
-            common::Time elapsed = simTime - this->lastUpdateTime;
-            if (elapsed >= this->updatePeriod)
+            common::Time simTime = _info.simTime;                       //更新系统时间simTime
+            common::Time elapsed = simTime - this->lastUpdateTime;      //系统时间simTime与上次更新的时间lastUpdateTime做差，得到距离上次更新的时间elapsed
+            if (elapsed >= this->updatePeriod)                          //距离上次更新的时间elapsed大于阈值updatePeriod时，才进行数据更新
             {
                 this->lastUpdateTime = _info.simTime;
 
 
-                ignition::math::Pose3d tagPose;
+                ignition::math::Pose3d tagPose;             //定义标签的3维位姿tagPose
 
-                if (!this->useParentAsReference)
+                if (!this->useParentAsReference)            //判断useParentAsReference，给tagPose进行赋值
                 {
-                    tagPose = this->tagLink->WorldPose();
+                    tagPose = this->tagLink->WorldPose();   //是，用tagLink作为pose的reference
                 }
                 else
                 {
-                    tagPose = this->model->WorldPose();
+                    tagPose = this->model->WorldPose();     //否，用model作为pose的reference
                 }
 
-                ignition::math::Vector3d posCorrectedZ(tagPose.Pos().X(), tagPose.Pos().Y(), tagPose.Pos().Z() + this->tagZOffset);
-                tagPose.Set(posCorrectedZ, tagPose.Rot());
-                ignition::math::Vector3d currentTagPose(tagPose.Pos());
+                ignition::math::Vector3d posCorrected(tagPose.Pos().X()+ this->tagXOffset, tagPose.Pos().Y()+ this->tagYOffset, tagPose.Pos().Z() + this->tagZOffset);     //定义3维向量posCorrected,其值为tagPose的xyz,同时加上标签的方向偏置值tagOffset(XYZ)
+                tagPose.Set(posCorrected, tagPose.Rot());      //利用修正z后的位置posCorrectedZ和原有的姿态tagPose.Rot，对tagPose的位姿进行重设
+                ignition::math::Vector3d currentTagPose(tagPose.Pos());     //把tagPose的位置tagPose.Pos()赋值给新的3维向量currentTagPose
 
-                tf::Quaternion q(tagPose.Rot().X(),
+                tf::Quaternion q(tagPose.Rot().X(),         //tagPose姿态的四元数转为欧拉角roll,pitch,currentYaw
                                  tagPose.Rot().Y(),
                                  tagPose.Rot().Z(),
                                  tagPose.Rot().W());
@@ -783,20 +926,20 @@ namespace gazebo
                 //     currentYaw = 2 * M_PI + currentYaw;
                 // }
 
-                double startAngle = currentYaw;
-                double currentAngle = 0;
-                double arc = 3 * M_PI / 2;
-                int numAnglesToTestBySide = 30;
-                double incrementAngle = arc / numAnglesToTestBySide;
-                int totalNumberAnglesToTest = 1 + 2 * numAnglesToTestBySide;
-                double anglesToTest[totalNumberAnglesToTest];
+                double startAngle = currentYaw;     //开始的角度startAngle设为currentYaw
+                double currentAngle = 0;            //现在的角度    0
+                double arc = 3 * M_PI / 2;          //1 arc 对应 270°
+                int numAnglesToTestBySide = 30;     //一侧侧需要测试角度的总数    30
+                double incrementAngle = arc / numAnglesToTestBySide;            //角度的增量  这里为270°/30 = 9°
+                int totalNumberAnglesToTest = 1 + 2 * numAnglesToTestBySide;    //总共需要测试的角度的总数(当前+两侧) 1 + 2 * 30 = 61
+                double anglesToTest[totalNumberAnglesToTest];                   //定义需要测试角度anglesToTest数组
 
-                anglesToTest[0] = startAngle;
-                for (int i = 1; i < totalNumberAnglesToTest; ++i)
+                anglesToTest[0] = startAngle;                           //数组angleToTest第一个存放开始的角度startAngle(currentYaw)
+                for (int i = 1; i < totalNumberAnglesToTest; ++i)       //遍历每一个需要测试的角度
                 {
-                    double angleToTest;
-                    if (i % 2 == 0)
-                    {
+                    double angleToTest;                                                 //对测试的角度进行编码
+                    if (i % 2 == 0)                                                     //   …   5    3    1      0       2   4   6  …          正方向奇数，负方向偶数，原点为0
+                    {                                                                   //+ <--------------  startAngle  ---------------- -
                         angleToTest = startAngle - (i / 2) * incrementAngle;
                         // if (angleToTest < 0)
                         // {
@@ -814,81 +957,107 @@ namespace gazebo
                     anglesToTest[i] = angleToTest;
                 }
 
-                visualization_msgs::MarkerArray markerArray;
-                visualization_msgs::MarkerArray interferencesArray;
+                visualization_msgs::MarkerArray markerArray;                //可视化Marker阵列  MarkerArray
+                visualization_msgs::MarkerArray interferencesArray;         //可视化Marker阵列  interferencesArray(干扰阵列?)
 
-                physics::Model_V models = this->world->Models();
-                for (physics::Model_V::iterator iter = models.begin(); iter != models.end(); ++iter)
+                physics::Model_V models = this->world->Models();            //获取模型们models
+                for (physics::Model_V::iterator iter = models.begin(); iter != models.end(); ++iter)  //遍历world中的每一个模型
                 {
-
-                    if ((*iter)->GetName().find(this->anchorPrefix) == 0)
+                       // cout<<((*iter)->GetName())<<endl;
+                    if (   (  (*iter)->GetName().find(this->anchorPrefix) == 0  ) && PubRangeTopic ) //找到带有anchorPrefix前缀命名的模型同时PubRangeTopic为true
                     {
-                        physics::ModelPtr anchor = *iter;
+                        physics::ModelPtr anchor = *iter;           //得到锚点anchor
+                        //std::string aidStr = anchor->GetName().substr(anchor->GetName().length()-1);
                         std::string aidStr = anchor->GetName().substr(this->anchorPrefix.length());
+
+                        //cout<<((*iter)->GetName())<<endl;
+                        //cout<<aidStr<<endl;
+                        //ROS_INFO("%s\n", &anchor);
+                        //ROS_INFO("%c\n", &aidStr);
                         int aid = std::stoi(aidStr);
-                        ignition::math::Pose3d anchorPose = anchor->WorldPose();
+                        ignition::math::Pose3d anchorPose = anchor->WorldPose();    //锚点的3维位姿anchoPose
 
-                        LOSType losType = LOS;
-                        double distance = tagPose.Pos().Distance(anchorPose.Pos());
-                        double distanceAfterRebounds = 0;
+                        LOSType losType = LOS;     //设定lostType为LOS(0)
+                        double distance = tagPose.Pos().Distance(anchorPose.Pos());     //得到标签与锚点之间的距离distance
+                        //double distanceAfterRebounds = 0;               //定义反射后的距离 0
 
-                        if (!allBeaconsAreLOS)
+                        if (!allBeaconsAreLOS)              //所有的信标不全是LOS的情况
                         {
                             //We check if a ray can reach the anchor:
-                            double distanceToObstacleFromTag;
-                            std::string obstacleName;
+                            double distanceToObstacleFromTag;   //从标签到障碍物的距离
+                            std::string obstacleName;           //障碍物名称
 
-                            ignition::math::Vector3d directionToAnchor = (anchorPose.Pos() - tagPose.Pos()).Normalize();
-                            this->firstRay->Reset();
-                            this->firstRay->SetPoints(tagPose.Pos(), anchorPose.Pos());
-                            this->firstRay->GetIntersection(distanceToObstacleFromTag, obstacleName);
+                            ignition::math::Vector3d directionToAnchor = (anchorPose.Pos() - tagPose.Pos()).Normalize();    //归一化后的标签到锚点的方向向量
 
-                            if (obstacleName.compare("") == 0)
+                            
+
+
+                            ignition::math::Vector3d tagPosOffset(tagPose.Pos().X() + directionToAnchor.X()* this->NoObstacleRadius, 
+                                                                                                            tagPose.Pos().Y() +  directionToAnchor.Y()* this->NoObstacleRadius ,
+                                                                                                            tagPose.Pos().Z() + directionToAnchor.Z() * this->NoObstacleRadius);     
+                            tagPose.Set(tagPosOffset, tagPose.Rot());      //修正用于检测障碍物的tag位置
+
+                            ignition::math::Vector3d anchorPosOffset(anchorPose.Pos().X() - directionToAnchor.X()* this->NoObstacleRadius, 
+                                                                                                            anchorPose.Pos().Y() -  directionToAnchor.Y()* this->NoObstacleRadius ,
+                                                                                                            anchorPose.Pos().Z() - directionToAnchor.Z() * this->NoObstacleRadius);     
+                            anchorPose.Set(anchorPosOffset, anchorPose.Rot());      //修正用于检测障碍物的anchor位置
+
+
+                            this->firstRay->Reset();                                        //重置firstRay
+                            this->firstRay->SetPoints(tagPose.Pos(), anchorPose.Pos());     //设firstRay为tagPose到anchorPose
+                            this->firstRay->GetIntersection(distanceToObstacleFromTag, obstacleName);   //从firstRay，得到标签到锚点途中，障碍物的信息，包括标签到障碍物的距离，障碍物的名称
+
+                            if (obstacleName.compare("") == 0)      //障碍物名称为空，即无障碍物，为LOS情况
                             {
                                 //There is no obstacle between anchor and tag, we use the LOS model
-                                losType = LOS;
-                                distanceAfterRebounds = distance;
+                                losType = LOS;                      //losType为LOS
+                                 this->RSSI = this->MaxRSS;
+                                //distanceAfterRebounds = distance;   //反射距离为直接距离
                             }
-                            else
+                            else                                    //存在障碍物,分情况讨论
                             {
 
                                 //We use a second ray to measure the distance from anchor to tag, so we can
                                 //know what is the width of the walls
-                                double distanceToObstacleFromAnchor;
-                                std::string otherObstacleName;
+                                double distanceToObstacleFromAnchor;    //锚点到障碍物的距离
+                                std::string otherObstacleName;          //其他障碍物的名称
 
-                                this->secondRay->Reset();
-                                this->secondRay->SetPoints(anchorPose.Pos(), tagPose.Pos());
-                                this->secondRay->GetIntersection(distanceToObstacleFromAnchor, otherObstacleName);
+                                this->secondRay->Reset();               //重置secondRay
+                                this->secondRay->SetPoints(anchorPose.Pos(), tagPose.Pos());    //设secondRay为anchorPose到tagPose
+                                this->secondRay->GetIntersection(distanceToObstacleFromAnchor, otherObstacleName);      //从secondRay，得到锚点到标签途中，障碍物的信息，包括锚点到障碍物的距离，障碍物的名称
 
-                                double wallWidth = distance - distanceToObstacleFromTag - distanceToObstacleFromAnchor;
-
-                                if (wallWidth <= this->nlosSoftWallWidth && obstacleName.compare(otherObstacleName) == 0)
+                                this->wallWidth = distance - distanceToObstacleFromTag - distanceToObstacleFromAnchor;     //得到障碍物的厚度wallWidth
+                                if (this->wallWidth <= this->nlosSoftWallWidth )   //障碍物厚度小于阈值，为NLOS_S
                                 {
                                     //We use NLOS - SOFT model
-                                    losType = NLOS_S;
-                                    distanceAfterRebounds = distance;
+                                    losType = NLOS_S;                   //losType为NLOS_S
+                                    this->RSSI = this->MaxRSS - (this->MaxRSS - this->MinRSS) * this->wallWidth / this->nlosSoftWallWidth;  //根据障碍物厚度得到当前RSSI值
                                 }
-                                else
+                                else        //障碍物厚度大于阈值
                                 {
+                                    losType =NLOS ;
+                                
+                                
+                                    
+                                    /*
                                     //We try to find a rebound to reach the anchor from the tag
-                                    bool end = false;
+                                    bool end = false;           //尝试找一个从标签到锚点的反射路径
 
-                                    double maxDistance = 30;
-                                    double distanceToRebound = 0;
-                                    double distanceToFinalObstacle = 0;
-                                    double distanceNlosHard = 0;
+                                    double maxDistance = 30;            //最远距离
+                                    double distanceToRebound = 0;       //到反射面的距离
+                                    double distanceToFinalObstacle = 0; //到最终障碍物的距离
+                                    double distanceNlosHard = 0;        //NLOS-H的距离
 
-                                    double stepFloor = 1;
-                                    double startFloorDistanceCheck = 2;
-                                    int numStepsFloor = 6;
+                                    double stepFloor = 1;                   //层数步长？
+                                    double startFloorDistanceCheck = 2;     //最初层数的检测距离？
+                                    int numStepsFloor = 6;                  //总层数？
 
 
-                                    std::string finalObstacleName;
-                                    int indexRay = 0;
-                                    bool foundNlosH = false;
+                                    std::string finalObstacleName;          //最终障碍物的名称
+                                    int indexRay = 0;                       //Ray的编号，用来索引之前的anglesToTest数组
+                                    bool foundNlosH = false;                //flag,是否找到NLOS
 
-                                    int currentFloorDistance = 0;
+                                    int currentFloorDistance = 0;           //当前层数的距离
 
                                     while (!end)
                                     {
@@ -995,32 +1164,32 @@ namespace gazebo
                                     {
                                         //We can not reach the anchor, no ranging.
                                         losType = NLOS;
-                                    }
+                                    }*/
                                 }
                             }
 
                         }
-                        else
+                        else        //所有信标都是LOS状态，则losType为LOS，反射距离等于直接距离
                         {
                             //All beacons are LOS
                             losType = LOS;
-                            distanceAfterRebounds = distance;
+                            this->RSSI = this->MaxRSS;
                         }
 
-                        if ((losType == LOS || losType == NLOS_S) && distanceAfterRebounds > maxDBDistance)
+                        if ((losType == LOS || losType == NLOS_S) && distance > maxDBDistance)  //对于LOS和NLOS_S情况，当距离大于maxDBDistance时，则变为NLOS情况
                         {
                             losType = NLOS;
                         }
 
-                        if (losType == NLOS_H && distanceAfterRebounds > maxDBDistance)
+                        /*if (losType == NLOS_H && distance > maxDBDistance)     //NLOS_H情况同上
                         {
                             losType = NLOS;
-                        }
+                        }*/
 
-                        if (losType != NLOS)
+                        if (losType != NLOS)        //对于非NLOS情况，即LOS,NLOS_H,NLOS_S
                         {
 
-                            int indexScenario = 0;
+                            /*int indexScenario = 0;      //方案序号，LOS为0，NLOS_H为1，NLOS_S为2
                             if (losType == NLOS_S)
                             {
                                 indexScenario = 2;
@@ -1029,10 +1198,10 @@ namespace gazebo
                             {
                                 indexScenario = 1;
                             }
+                                                            //round()函数：返回四舍五入后的值
+                            int indexRangingOffset = (int) round(distanceAfterRebounds / stepDBDistance);       //在RangingOffset中的序号，按相应比值进行四舍五入获得
 
-                            int indexRangingOffset = (int) round(distanceAfterRebounds / stepDBDistance);
-
-                            double distanceAfterReboundsWithOffset = distanceAfterRebounds;
+                            double distanceAfterReboundsWithOffset = distanceAfterRebounds;                 //根据LOS与NLOS_S情况，(基于测试得到的数据rangingOffset?)，对测距的偏置进行补偿
                             if (losType == LOS)
                             {
                                 distanceAfterReboundsWithOffset = distanceAfterRebounds + rangingOffset[indexRangingOffset][0] / 1000.0;
@@ -1042,22 +1211,43 @@ namespace gazebo
                                 distanceAfterReboundsWithOffset = distanceAfterRebounds + rangingOffset[indexRangingOffset][1] / 1000.0;
                             }
 
-                            int indexRanging = (int) round(distanceAfterReboundsWithOffset / stepDBDistance);
+                            int indexRanging = (int) round(distanceAfterReboundsWithOffset / stepDBDistance);   //补偿后的反射距离于步长基于数据(?)长度的比值，得到测距的序号*/
+
+                            //normal_distribution:正态分布
 
 
-                            std::normal_distribution<double> distributionRanging(distanceAfterReboundsWithOffset * 1000, rangingStd[indexRanging][indexScenario]);
-                            std::normal_distribution<double> distributionRss(rssMean[indexRanging][indexScenario], rssStd[indexRanging][indexScenario]);
+                            double DisDeacayRss = this->MaxDisDecay * distance / maxDBDistance;
+                            double powerValue = this->RSSI - DisDeacayRss;
 
-                            double rangingValue = distributionRanging(this->random_generator);
-                            double powerValue = distributionRss(this->random_generator);
+                            if (powerValue < MinRSS)   losType = NLOS;
 
-                            if (powerValue < minPower[indexScenario])
+                            double PosNoise ;
+                            if (losType == LOS) PosNoise = this->MinPosNoise;
+                            else
                             {
-                                losType = NLOS;
+                                PosNoise= this->MinPosNoise + (this->MaxPosNoise - this->MinPosNoise) * (this->MaxRSS-powerValue) / (this->MaxRSS - this->MinRSS);
                             }
                             
 
-                            if (losType!=NLOS)
+                            
+
+                            std::normal_distribution<double> distributionRanging(distance * 1000, PosNoise);
+                           // std::normal_distribution<double> distributionRss(rssMean[indexRanging][indexScenario], rssStd[indexRanging][indexScenario]);
+                                                                            //对补偿后的测距，根据方案序号(losType)，（以及测试数据rangingStd?），对测距数据进行正态分布处理，得到最终测距数据rangingValue
+                                                                            //根据方案序号(losType)，（以及测试数据rssMean和rssStd?），得到正态分布处理后的rss(接收信号强度)数据powerValue
+
+                            double rangingValue = distributionRanging(this->random_generator);
+                            //double powerValue = distributionRss(this->random_generator);
+                            /*double DisDeacayRss = this->MaxDisDecay * distance / maxDBDistance;
+                            double powerValue = this->RSSI - DisDeacayRss;*/
+
+                            /*if (powerValue < minPower[indexScenario])       //三种情况下，小于(实验测得的最小接收信号强度minPower?)是，losTpye变为NLOS
+                            {
+                                losType = NLOS;
+                            }*/
+                            
+
+                            if (losType!=NLOS )//   && aid != tagId)              //非NLOS情况下，发布测距话题,对应ranging_msg消息
                             {
                                 gtec_msgs::Ranging ranging_msg;
                                 ranging_msg.anchorId = aid;
@@ -1065,16 +1255,16 @@ namespace gazebo
                                 ranging_msg.range = rangingValue;
                                 ranging_msg.seq = this->sequence;
                                 ranging_msg.rss = powerValue;
-                                ranging_msg.errorEstimation = 0.00393973;
+                                ranging_msg.errorEstimation = PosNoise; 
                                 this->gtecUwbPub.publish(ranging_msg);
                             }
                         }
 
-                        visualization_msgs::Marker marker;
+                        /*visualization_msgs::Marker marker;                 //更具losType情况发布MarkerArray
                         marker.header.frame_id = "world";
-                        marker.header.stamp = ros::Time();
+                        marker.header.stamp = ros::Time::now();     //之前为ros::Time()，没消息
                         marker.id = aid;
-                        marker.type = visualization_msgs::Marker::CYLINDER;
+                        marker.type = visualization_msgs::Marker::CYLINDER;     //圆柱体
                         marker.action = visualization_msgs::Marker::ADD;
                         marker.pose.position.x = anchorPose.Pos().X();
                         marker.pose.position.y = anchorPose.Pos().Y();
@@ -1088,36 +1278,193 @@ namespace gazebo
                         marker.scale.z = 0.5;
                         marker.color.a = 1.0;
 
-                        if (losType == LOS)
+                        if (losType == LOS)         //LOS为绿色
                         {
                             marker.color.r = 0.0;
                             marker.color.g = 0.6;
                             marker.color.b = 0.0;
                         }
-                        else if (losType == NLOS_S)
+                        else if (losType == NLOS_S) //NLOS_S为黄色
                         {
                             marker.color.r = 0.6;
                             marker.color.g = 0.6;
                             marker.color.b = 0.0;
                         }
-                        else if (losType == NLOS_H)
+                        else if (losType == NLOS_H) //NLOS_H为蓝色
                         {
                             marker.color.r = 0.0;
                             marker.color.g = 0.0;
                             marker.color.b = 0.6;
                         }
-                        else if (losType == NLOS)
+                        else if (losType == NLOS) //NLOS为红色
                         {
                             marker.color.r = 0.6;
                             marker.color.g = 0.0;
                             marker.color.b = 0.0;
                         }
 
-                        markerArray.markers.push_back(marker);
+                        markerArray.markers.push_back(marker);*/
+                    }
+
+                    //2023.2.18
+                    else if ((  (*iter)->GetName().find(this->VehiclePrefix) == 0  )  &&  PubRangeVehicleTopic) //找到带有VehiclePrefix前缀命名的模型同时PubRangeVehicleTopic为true
+                    {
+                        physics::ModelPtr vehicle = *iter;           //得到载具vehicle
+                        //std::string aidStr = anchor->GetName().substr(anchor->GetName().length()-1);
+                        std::string vidStr = vehicle->GetName().substr(this->VehiclePrefix.length()+1);
+
+                        /*cout<<tagId<<endl;
+                        cout<<((*iter)->GetName())<<endl;
+                        cout<<endl;*/
+                        //cout<<vidStr<<endl;
+                        
+                        int vid = std::stoi(vidStr);
+                        ignition::math::Pose3d vehiclePose = vehicle->WorldPose();    //锚点的3维位姿anchoPose
+
+                        LOSType losType = LOS;     //设定lostType为LOS(0)
+                        double distance = tagPose.Pos().Distance(vehiclePose.Pos());     //得到标签与载具之间的距离distance
+                        //double distanceAfterRebounds = 0;               //定义反射后的距离 0
+
+                        if (!allBeaconsAreLOS)              //所有的信标不全是LOS的情况
+                        {
+                            
+                            double distanceToObstacleFromTag;   //从标签到障碍物的距离
+                            std::string obstacleName;           //障碍物名称
+
+                            ignition::math::Vector3d directionToVehicle = (vehiclePose.Pos() - tagPose.Pos()).Normalize();    //归一化后的标签到载具的方向向量
+
+
+
+                            ignition::math::Vector3d tagPosOffset(tagPose.Pos().X() + directionToVehicle.X()* this->NoObstacleRadius, 
+                                                                                                            tagPose.Pos().Y() +  directionToVehicle.Y()* this->NoObstacleRadius ,
+                                                                                                            tagPose.Pos().Z() + directionToVehicle.Z() * this->NoObstacleRadius);     
+                            tagPose.Set(tagPosOffset, tagPose.Rot());      //修正用于检测障碍物的tag位置
+
+                            ignition::math::Vector3d vehiclePosOffset(vehiclePose.Pos().X() - directionToVehicle.X()* this->NoObstacleRadius, 
+                                                                                                            vehiclePose.Pos().Y() -  directionToVehicle.Y()* this->NoObstacleRadius ,
+                                                                                                            vehiclePose.Pos().Z() - directionToVehicle.Z() * this->NoObstacleRadius);     
+                            vehiclePose.Set(vehiclePosOffset, vehiclePose.Rot());      //修正用于检测障碍物的vehicle位置
+
+                            this->firstRay->Reset();                                        //重置firstRay
+                            this->firstRay->SetPoints(tagPose.Pos(), vehiclePose.Pos());     //设firstRay为tagPose到vehiclePose
+                            this->firstRay->GetIntersection(distanceToObstacleFromTag, obstacleName);   //从firstRay，得到标签到载具途中，障碍物的信息，包括标签到障碍物的距离，障碍物的名称
+
+                            /*cout<<"Vehicle  "<<vid<<endl;
+                            cout<<"distanceToObstacleFromTag  "<<tagId<<" :"<<distanceToObstacleFromTag<<endl;
+                            cout<<"obstacleName:"<<obstacleName<<endl;*/
+
+
+                            if (obstacleName.compare("") == 0)      //障碍物名称为空，即无障碍物，为LOS情况
+                            {
+                                //There is no obstacle between anchor and tag, we use the LOS model
+                                losType = LOS;                      //losType为LOS
+                                 this->RSSI = this->MaxRSS;
+                                //distanceAfterRebounds = distance;   //反射距离为直接距离
+                                //cout<<"No Obstacle ,  LOS"<<endl;
+                            }
+                            else                                    //存在障碍物,分情况讨论
+                            {
+
+                                //We use a second ray to measure the distance from anchor to tag, so we can
+                                //know what is the width of the walls
+                                double distanceToObstacleFromVehicle;    //载具到障碍物的距离
+                                std::string otherObstacleName;          //其他障碍物的名称
+
+                                this->secondRay->Reset();               //重置secondRay
+                                this->secondRay->SetPoints(vehiclePose.Pos(), tagPose.Pos());    //设secondRay为anchorPose到tagPose
+                                this->secondRay->GetIntersection(distanceToObstacleFromVehicle, otherObstacleName);      //从secondRay，得到锚点到标签途中，障碍物的信息，包括锚点到障碍物的距离，障碍物的名称
+
+                                //cout<<"distanceToObstacleFromVehicle:"<<distanceToObstacleFromVehicle<<endl;
+
+                                this->wallWidth = distance - distanceToObstacleFromTag - distanceToObstacleFromVehicle;     //得到障碍物的厚度wallWidth
+
+                                
+                                
+                                //ROS_INFO("wallWidth of vehicle:  %f\n",this->wallWidth);
+                                if (this->wallWidth <= this->nlosSoftWallWidth )   //障碍物厚度小于阈值，为NLOS_S
+                                {
+                                    //We use NLOS - SOFT model
+                                    losType = NLOS_S;                   //losType为NLOS_S
+                                    this->RSSI = this->MaxRSS - (this->MaxRSS - this->MinRSS) * this->wallWidth / this->nlosSoftWallWidth;  //根据障碍物厚度得到当前RSSI值
+                                }
+                                else        //障碍物厚度大于阈值
+                                {
+                                    losType =NLOS ;
+                                
+                                }
+                            }
+
+                        }
+                        else        //所有信标都是LOS状态，则losType为LOS，反射距离等于直接距离
+                        {
+                            //All beacons are LOS
+                            losType = LOS;
+                            this->RSSI = this->MaxRSS;
+                        }
+
+                        if ((losType == LOS || losType == NLOS_S) && distance > maxDBDistance)  //对于LOS和NLOS_S情况，当距离大于maxDBDistance时，则变为NLOS情况
+                        {
+                            losType = NLOS;
+                        }
+
+                        /*if (losType == NLOS_H && distance > maxDBDistance)     //NLOS_H情况同上
+                        {
+                            losType = NLOS;
+                        }*/
+
+                        if (losType != NLOS)        //对于非NLOS情况，即LOS,NLOS_H,NLOS_S
+                        {
+
+              
+
+                            //normal_distribution:正态分布
+
+
+                            double DisDeacayRss = this->MaxDisDecay * distance / maxDBDistance;
+                            double powerValue = this->RSSI - DisDeacayRss;
+
+                            if (powerValue < MinRSS)   losType = NLOS;
+
+                            double PosNoise ;
+                            if (losType == LOS)     PosNoise = this->MinPosNoise;
+                           
+                            else
+                            {
+                                PosNoise= this->MinPosNoise + (this->MaxPosNoise - this->MinPosNoise) * (this->MaxRSS-powerValue) / (this->MaxRSS - this->MinRSS);
+                            }
+                            
+
+                            
+
+                            std::normal_distribution<double> distributionRanging(distance * 1000, PosNoise);
+                           // std::normal_distribution<double> distributionRss(rssMean[indexRanging][indexScenario], rssStd[indexRanging][indexScenario]);
+                                                                            //对补偿后的测距，根据方案序号(losType)，（以及测试数据rangingStd?），对测距数据进行正态分布处理，得到最终测距数据rangingValue
+                                                                            //根据方案序号(losType)，（以及测试数据rssMean和rssStd?），得到正态分布处理后的rss(接收信号强度)数据powerValue
+
+                            double rangingValue = distributionRanging(this->random_generator);
+                         
+                           /* cout<<endl;
+                            cout<<vid<<endl;
+                            cout<<tagId<<endl;
+                            cout<<endl;*/
+                            if ( vid != tagId)              //非同ID情况下，发布测距话题,对应ranging_msg消息
+                            {
+                                gtec_msgs::Ranging_Vehicle ranging_msg;
+                                ranging_msg.vehicleId = vid;
+                                ranging_msg.tagId = this->tagId;
+                                ranging_msg.range = rangingValue;
+                                ranging_msg.seq = this->sequence;
+                                ranging_msg.rss = powerValue;
+                                ranging_msg.errorEstimation = PosNoise; 
+                                this->gtecUwbPubVehicle.publish(ranging_msg);
+                            }
+                        }
+
+                      
                     }
                 }
 
-                this->gtecAnchors.publish(markerArray);
+                //this->gtecAnchors.publish(markerArray);
                 this->sequence++;
             }
         }
@@ -1158,16 +1505,28 @@ namespace gazebo
         common::Time lastUpdateTime;
     private:
         double tagZOffset;
+
+    //2023.2.21
+    private:
+        double tagXOffset;
+     private:
+        double tagYOffset;
+
     private:
         std::string anchorPrefix;
     private:
         physics::LinkPtr tagLink;
     private:
         ros::Publisher gtecUwbPub;
+
+    //2023.2.18
     private:
-        ros::Publisher gtecAnchors;
+        ros::Publisher gtecUwbPubVehicle;
+
+    //private:
+    //    ros::Publisher gtecAnchors;
     private:
-        unsigned char sequence;
+        unsigned int sequence;      //之前是unsined char
     private:
         double nlosSoftWallWidth;
     private:
@@ -1182,6 +1541,37 @@ namespace gazebo
         bool useParentAsReference;
     private:
         std::default_random_engine random_generator;
+
+    //2023.2.17
+    private:
+        double wallWidth;
+    private:
+        int MaxPosNoise;
+    private:
+        int MinPosNoise;
+    private :
+        float MaxRSS;
+    private :
+        float MinRSS;
+    private:
+        double RSSI;
+    private:
+        float MaxDisDecay;
+
+    //2023.2.18
+    private:
+        std::string VehiclePrefix;
+
+    //2023.2.20
+    private:
+        bool PubRangeTopic;
+    private:
+        bool PubRangeVehicleTopic;
+
+    //2023.2.21
+    private:
+        double NoObstacleRadius;
+
     };
 
     GZ_REGISTER_MODEL_PLUGIN(UwbPlugin)
